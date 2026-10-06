@@ -1,13 +1,14 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
-import { Search, Gauge, Fuel, Navigation, Snowflake, MapPin, AlertTriangle, Zap, Satellite, Wifi, Sparkles, X } from 'lucide-react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { Search, Gauge, Fuel, Navigation, Snowflake, AlertTriangle, Zap, Satellite, Wifi, Sparkles, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx } from 'clsx';
-import { GoogleMapCanvas } from '../components/map/GoogleMapCanvas';
+import L from 'leaflet';
+import { GoogleMapCanvas, isMapAlive } from '../components/map/GoogleMapCanvas';
 import { TruckMarker } from '../components/map/TruckMarker';
 import { Button } from '../components/ui/Button';
 import { useToast } from '../context/ToastContext';
 import { usePort } from '../context/PortContext';
-import { triggerReroute, bookSlot, fetchFleet, createTelemetryWebSocket } from '../services/api';
+import { triggerReroute, bookSlot, fetchFleet, fetchRoute, createTelemetryWebSocket } from '../services/api';
 import { getDemoFleet } from '../data/demoFleet';
 import type { Truck } from '../types';
 
@@ -35,6 +36,8 @@ const STATUS_DOT_FALLBACK = 'bg-slate-400';
 const STATUS_BG_FALLBACK = 'bg-slate-500/15 text-slate-700 dark:text-slate-400 border border-slate-400/30';
 
 const STATUS_FILTER_ORDER = ['all', 'in_transit', 'at_gate', 'queued', 'loading', 'delayed', 'idle', 'outbound'] as const;
+
+const PROGRESS_STEPS = ['queued', 'in_transit', 'at_gate', 'loading'] as const;
 
 export default function FleetTrackerPage() {
   const { showToast } = useToast();
@@ -100,6 +103,35 @@ export default function FleetTrackerPage() {
     return () => handle.close();
   }, [portId]);
 
+  // Selected-truck route: one cyan polyline from the truck to its port gate.
+  // Cleared whenever selection changes so only the clicked truck is shown.
+  const routeLayer = useRef<L.Layer | null>(null);
+  useEffect(() => {
+    const map: any = mapInstance;
+    const clearRoute = () => {
+      if (routeLayer.current && map) {
+        try { map.removeLayer(routeLayer.current); } catch { /* gone */ }
+        routeLayer.current = null;
+      }
+    };
+    if (!map || !isMapAlive(map) || !selectedTruck) { clearRoute(); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetchRoute(selectedTruck.latitude, selectedTruck.longitude, port.lat - 0.03, port.lng + 0.04);
+        if (cancelled || !isMapAlive(map)) return;
+        clearRoute();
+        const line = L.polyline(
+          r.geometry.coordinates.map((c: [number, number]) => [c[1], c[0]] as [number, number]),
+          { color: '#06b6d4', weight: 4, opacity: 0.9 }
+        );
+        line.addTo(map);
+        routeLayer.current = line;
+      } catch { /* route is best-effort */ }
+    })();
+    return () => { cancelled = true; };
+  }, [mapInstance, selectedTruck?.id, port.lat, port.lng]);
+
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { all: fleet.length };
     for (const t of fleet) {
@@ -155,31 +187,30 @@ export default function FleetTrackerPage() {
     } finally { setIsDispatching(false); }
   };
 
+  const progressPct = selectedTruck?.mission?.progressPct ?? 0;
+  const progressStepIdx = selectedTruck ? PROGRESS_STEPS.indexOf(selectedTruck.status as typeof PROGRESS_STEPS[number]) : -1;
+
   return (
     <div className="h-full flex flex-col overflow-hidden bg-[var(--bg-canvas)] relative">
-      {/* Header */}
-      <div className="px-6 py-4 border-b border-white/40 dark:border-white/10 flex-shrink-0 flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-xl font-black text-slate-900 dark:text-white chroma-text">
-              Fleet Telematics & GIS Tracker
-            </h1>
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-full bg-cyan-500/15 text-cyan-600 dark:text-cyan-300 border border-cyan-400/30">
-              <Sparkles className="w-2.5 h-2.5 text-cyan-500" />
-              GNSS RTK 5G NR
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Real-time multi-band GPS tracking · Geofence status alerts · 5G NR low-latency telemetry
-          </p>
+      {/* Compact header */}
+      <div className="px-4 py-2 border-b border-white/40 dark:border-white/10 flex-shrink-0 flex items-center justify-between">
+        <div className="flex items-center gap-2 min-w-0">
+          <h1 className="text-base font-black text-slate-900 dark:text-white chroma-text truncate">
+            Fleet Telematics & GIS Tracker
+          </h1>
+          <span className="inline-flex flex-shrink-0 items-center gap-1 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-full bg-cyan-500/15 text-cyan-600 dark:text-cyan-300 border border-cyan-400/30">
+            <Sparkles className="w-2.5 h-2.5 text-cyan-500" />
+            GNSS RTK 5G NR
+          </span>
         </div>
+        <span className="hidden md:block text-[11px] text-slate-500 dark:text-slate-400 font-mono flex-shrink-0">{filteredFleet.length} trucks</span>
       </div>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Left — Vehicle List in Liquid Neu-Glass Container */}
-        <div id="tutorial-fleet-list" className="w-[410px] flex-shrink-0 flex flex-col border-r border-white/40 dark:border-white/10 liquid-glass backdrop-blur-2xl">
+        {/* Left — compact vehicle list */}
+        <div id="tutorial-fleet-list" className="w-[300px] max-w-[80vw] flex-shrink-0 flex flex-col border-r border-white/40 dark:border-white/10 liquid-glass backdrop-blur-2xl">
           {/* Search Debossed Inset Well */}
-          <div id="tutorial-fleet-search" className="p-3.5 border-b border-white/40 dark:border-white/10 flex-shrink-0">
+          <div id="tutorial-fleet-search" className="p-2.5 border-b border-white/40 dark:border-white/10 flex-shrink-0">
             <div className="relative rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/70 dark:border-white/10 neu-inset overflow-hidden focus-within:ring-2 focus-within:ring-cyan-400">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-cyan-500" />
               <input
@@ -192,7 +223,7 @@ export default function FleetTrackerPage() {
           </div>
 
           {/* Status Filter Pills (Tactile Neu-Pills) */}
-          <div className="flex gap-1.5 px-3.5 py-2.5 overflow-x-auto flex-shrink-0 border-b border-white/40 dark:border-white/10 no-scrollbar">
+          <div className="flex gap-1.5 px-2.5 py-2 overflow-x-auto flex-shrink-0 border-b border-white/40 dark:border-white/10 no-scrollbar">
             {STATUS_FILTER_ORDER.filter((s) => s === 'all' || (statusCounts[s] ?? 0) > 0).map((s) => (
               <button
                 key={s}
@@ -209,34 +240,33 @@ export default function FleetTrackerPage() {
             ))}
           </div>
 
-          {/* Truck Cards */}
-          <div className="flex-1 overflow-y-auto py-3 px-3.5 space-y-2.5">
-            {isLoading && <div className="space-y-2">{[1, 2, 3].map(item => <div key={item} className="h-28 rounded-2xl bg-white/40 dark:bg-slate-900/40 animate-pulse" />)}</div>}
-            {loadError && <div className="mb-3 p-3 rounded-2xl bg-amber-500/10 border border-amber-400/30 text-xs text-amber-700 dark:text-amber-300">{loadError}</div>}
-            {!isLoading && filteredFleet.length === 0 && <div className="p-6 text-center text-xs text-slate-500">No trucks match these filters.</div>}
+          {/* Compact truck cards */}
+          <div className="flex-1 overflow-y-auto py-2 px-2.5 space-y-2">
+            {isLoading && <div className="space-y-2">{[1, 2, 3].map(item => <div key={item} className="h-20 rounded-2xl bg-white/40 dark:bg-slate-900/40 animate-pulse" />)}</div>}
+            {loadError && <div className="mb-2 p-2.5 rounded-2xl bg-amber-500/10 border border-amber-400/30 text-[11px] text-amber-700 dark:text-amber-300">{loadError}</div>}
+            {!isLoading && filteredFleet.length === 0 && <div className="p-4 text-center text-[11px] text-slate-500">No trucks match these filters.</div>}
             {filteredFleet.map(truck => (
               <button
                 key={truck.id}
                 onClick={() => handleTruckClick(truck)}
                 className={clsx(
-                  'w-full text-left p-3.5 rounded-2xl border transition-all duration-200 relative overflow-hidden backdrop-blur-xl',
+                  'w-full text-left p-2.5 rounded-2xl border transition-all duration-200 relative overflow-hidden backdrop-blur-xl',
                   selectedTruck?.id === truck.id
                     ? 'border-cyan-400 dark:border-cyan-400 bg-sky-500/15 dark:bg-cyan-500/15 shadow-[0_0_20px_rgba(6,182,212,0.25)] scale-[1.01]'
                     : 'border-white/60 dark:border-white/10 bg-white/60 dark:bg-slate-900/50 hover:border-cyan-400/50 neu-flat-sm'
                 )}
               >
-                <div className="flex items-start gap-3">
-                  <div className={clsx('w-2 h-2 rounded-full mt-1.5 flex-shrink-0 shadow-sm', (STATUS_COLORS[truck.status] || 'text-slate-400').replace('text-', 'bg-') || STATUS_DOT_FALLBACK)} />
+                <div className="flex items-start gap-2">
+                  <div className={clsx('w-2 h-2 rounded-full mt-1 flex-shrink-0 shadow-sm', (STATUS_COLORS[truck.status] || 'text-slate-400').replace('text-', 'bg-') || STATUS_DOT_FALLBACK)} />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className="text-sm font-black text-slate-900 dark:text-white font-mono">{truck.id}</span>
-                      <span className="text-[10px] font-bold text-slate-500 font-mono">{truck.plate}</span>
-                      <span className={clsx('ml-auto px-2 py-0.5 rounded-full text-[8px] font-black uppercase', STATUS_BG[truck.status] || STATUS_BG_FALLBACK)}>
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[13px] font-black text-slate-900 dark:text-white font-mono truncate">{truck.id}</span>
+                      <span className={clsx('ml-auto px-1.5 py-0.5 rounded-full text-[8px] font-black uppercase flex-shrink-0', STATUS_BG[truck.status] || STATUS_BG_FALLBACK)}>
                         {(truck.status || 'unknown').replace('_', ' ')}
                       </span>
                     </div>
-                    <div className="text-xs font-semibold text-slate-700 dark:text-slate-200 truncate">{truck.driver.name}</div>
-                    <div className="text-[10px] text-slate-400 truncate mt-0.5">
+                    <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate">{truck.driver.name} <span className="font-normal text-slate-400">· {truck.plate}</span></div>
+                    <div className="text-[10px] text-slate-400 truncate">
                       {truck.mission.origin} → {truck.mission.destination}
                     </div>
 
@@ -247,7 +277,7 @@ export default function FleetTrackerPage() {
                       </div>
                     )}
 
-                    <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-200/40 dark:border-white/10">
+                    <div className="flex items-center gap-2 mt-1.5 pt-1.5 border-t border-slate-200/40 dark:border-white/10">
                       <div className="flex items-center gap-1">
                         <Gauge className="w-3 h-3 text-cyan-500" />
                         <span className="text-[10px] tabular font-bold text-slate-700 dark:text-slate-200 font-mono">
@@ -256,7 +286,7 @@ export default function FleetTrackerPage() {
                       </div>
                       <div className="flex items-center gap-1 flex-1">
                         <Fuel className="w-3 h-3 text-amber-500 flex-shrink-0" />
-                        <div className="flex-1 h-1.5 bg-slate-200/80 dark:bg-slate-800 rounded-full overflow-hidden neu-inset-sm">
+                        <div className="flex-1 h-1 bg-slate-200/80 dark:bg-slate-800 rounded-full overflow-hidden neu-inset-sm">
                           <div
                             className={clsx('h-full rounded-full transition-all', truck.fuelPct > 50 ? 'bg-emerald-500' : truck.fuelPct > 20 ? 'bg-amber-500' : 'bg-red-500')}
                             style={{ width: `${truck.fuelPct}%` }}
@@ -297,93 +327,102 @@ export default function FleetTrackerPage() {
             </div>
           </div>
 
-          {/* Vehicle Inspector Floating Liquid Glass Modal */}
+          {/* Selected-truck progress — small right panel below the map switcher */}
           <AnimatePresence>
             {selectedTruck && (
               <motion.div
-                initial={{ y: 24, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: 24, opacity: 0 }}
-                className="absolute bottom-5 left-5 right-5 z-20 p-5 rounded-3xl
+                initial={{ x: 24, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 24, opacity: 0 }}
+                className="absolute right-3 top-16 bottom-3 z-20 w-[260px] max-w-[80vw] overflow-y-auto p-3.5 rounded-3xl
                   liquid-glass-elevated border border-white/70 dark:border-white/20
-                  shadow-2xl backdrop-blur-3xl"
+                  shadow-2xl backdrop-blur-3xl space-y-3"
               >
-                <div className="flex items-center justify-between mb-3.5">
-                  <div>
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-base font-black text-slate-900 dark:text-white font-mono chroma-text">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-sm font-black text-slate-900 dark:text-white font-mono chroma-text">
                         {selectedTruck.id}
                       </span>
-                      <span className="text-xs font-bold text-slate-500 font-mono">{selectedTruck.plate}</span>
-                      <span className={clsx('px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase', STATUS_BG[selectedTruck.status] || STATUS_BG_FALLBACK)}>
+                      <span className={clsx('px-2 py-0.5 rounded-full text-[8px] font-black uppercase', STATUS_BG[selectedTruck.status] || STATUS_BG_FALLBACK)}>
                         {(selectedTruck.status || 'unknown').replace('_', ' ')}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 font-medium">
-                      {selectedTruck.vehicleMake} · {selectedTruck.containerSize} · Driver: {selectedTruck.driver.name}
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 truncate">
+                      {selectedTruck.plate} · {selectedTruck.driver.name}
+                    </p>
+                    <p className="text-[10px] text-slate-400 truncate">
+                      {selectedTruck.mission.origin} → {selectedTruck.mission.destination}
                     </p>
                   </div>
                   <button
                     onClick={() => setSelectedTruck(null)}
-                    className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-100 neu-button"
+                    className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-100 neu-button flex-shrink-0"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
-                {/* 4-stage mission breadcrumb */}
-                <div className="flex items-center gap-1.5 mb-3.5 overflow-x-auto no-scrollbar">
-                  {['Chennai CFS', 'Tambaram Toll', 'VOC Gate 3', 'Berth 4 STS'].map((step, i) => (
-                    <div key={step} className="flex items-center gap-1.5 flex-shrink-0">
-                      <div className={clsx(
-                        'flex items-center gap-1.5 px-3 py-1 rounded-xl text-[10px] font-bold border',
-                        i <= 1
-                          ? 'bg-emerald-500/15 border-emerald-400/30 text-emerald-700 dark:text-emerald-300'
-                          : i === 2
-                          ? 'bg-cyan-500/15 border-cyan-400/30 text-cyan-700 dark:text-cyan-300'
-                          : 'bg-white/40 dark:bg-slate-800/40 border-white/40 dark:border-white/10 text-slate-400'
-                      )}>
-                        <MapPin className="w-3 h-3" /> {step}
+                {/* Route progress */}
+                <div>
+                  <div className="flex items-center justify-between text-[10px] font-bold mb-1">
+                    <span className="text-slate-500 dark:text-slate-400 uppercase tracking-wider">Route progress</span>
+                    <span className="tabular font-mono text-cyan-600 dark:text-cyan-300">{progressPct}%</span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden neu-inset-sm">
+                    <div className="h-full rounded-full bg-gradient-to-r from-sky-500 to-cyan-500 transition-all" style={{ width: `${progressPct}%` }} />
+                  </div>
+                  <div className="flex items-center gap-1 mt-2 overflow-x-auto no-scrollbar">
+                    {PROGRESS_STEPS.map((step, i) => (
+                      <div key={step} className="flex items-center gap-1 flex-shrink-0">
+                        <div className={clsx(
+                          'px-2 py-0.5 rounded-lg text-[9px] font-bold border whitespace-nowrap',
+                          progressStepIdx >= 0 && i <= progressStepIdx
+                            ? 'bg-cyan-500/15 border-cyan-400/30 text-cyan-700 dark:text-cyan-300'
+                            : 'bg-white/40 dark:bg-slate-800/40 border-white/40 dark:border-white/10 text-slate-400'
+                        )}>
+                          {step.replace('_', ' ')}
+                        </div>
+                        {i < PROGRESS_STEPS.length - 1 && <span className="text-slate-300 dark:text-slate-600 text-[9px] font-bold">→</span>}
                       </div>
-                      {i < 3 && <span className="text-slate-300 dark:text-slate-600 font-bold">→</span>}
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1.5">
+                    ETA <span className="font-bold font-mono">{selectedTruck.mission.etaTime}</span> · {selectedTruck.mission.distanceRemainingKm} km to {port.short}
+                  </p>
                 </div>
 
-                {/* Telemetry row (Tactile Inset Gauges) */}
-                <div className="grid grid-cols-4 gap-3">
-                  <div className="p-3 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
-                    <Gauge className="w-4 h-4 text-cyan-500 mx-auto mb-1" />
-                    <div className="text-base font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.speedKmh}</div>
-                    <div className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">km/h</div>
+                {/* Compact telemetry */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded-xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
+                    <Gauge className="w-3.5 h-3.5 text-cyan-500 mx-auto mb-0.5" />
+                    <div className="text-sm font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.speedKmh}</div>
+                    <div className="text-[8px] text-slate-400 uppercase font-bold tracking-wider">km/h</div>
                   </div>
-                  <div className="p-3 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
-                    <Navigation className="w-4 h-4 text-cyan-500 mx-auto mb-1" />
-                    <div className="text-base font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.heading}°</div>
-                    <div className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Heading ESE</div>
+                  <div className="p-2 rounded-xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
+                    <Fuel className="w-3.5 h-3.5 text-amber-500 mx-auto mb-0.5" />
+                    <div className="text-sm font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.fuelPct}%</div>
+                    <div className="text-[8px] text-slate-400 uppercase font-bold tracking-wider">Fuel</div>
                   </div>
-                  <div className="p-3 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
-                    <Fuel className="w-4 h-4 text-amber-500 mx-auto mb-1" />
-                    <div className="text-base font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.fuelPct}%</div>
-                    <div className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Fuel Level</div>
+                  <div className="p-2 rounded-xl bg-white/60 dark:bg-slate-900/60 border border-white/60 dark:border-white/10 neu-flat-sm text-center">
+                    <Navigation className="w-3.5 h-3.5 text-cyan-500 mx-auto mb-0.5" />
+                    <div className="text-sm font-black tabular text-slate-900 dark:text-white font-mono">{selectedTruck.heading}°</div>
+                    <div className="text-[8px] text-slate-400 uppercase font-bold tracking-wider">Heading</div>
                   </div>
-                  <div className="p-3 rounded-2xl bg-sky-500/10 dark:bg-cyan-500/10 border border-sky-400/30 dark:border-cyan-400/30 neu-flat-sm text-center">
-                    <Snowflake className="w-4 h-4 text-cyan-500 mx-auto mb-1 animate-spin-slow" />
-                    <div className="text-base font-black tabular text-cyan-600 dark:text-cyan-300 font-mono">{selectedTruck.reeferTempC ?? '—'}°</div>
-                    <div className="text-[9px] text-cyan-600 dark:text-cyan-400 uppercase font-bold tracking-wider">Reefer Temp</div>
+                  <div className="p-2 rounded-xl bg-sky-500/10 dark:bg-cyan-500/10 border border-sky-400/30 dark:border-cyan-400/30 neu-flat-sm text-center">
+                    <Snowflake className="w-3.5 h-3.5 text-cyan-500 mx-auto mb-0.5" />
+                    <div className="text-sm font-black tabular text-cyan-600 dark:text-cyan-300 font-mono">{selectedTruck.reeferTempC ?? '—'}°</div>
+                    <div className="text-[8px] text-cyan-600 dark:text-cyan-400 uppercase font-bold tracking-wider">Reefer</div>
                   </div>
                 </div>
 
                 {/* Actions */}
-                <div className="flex gap-2.5 mt-4">
-                  <Button variant="primary" size="sm" className="flex-1" isLoading={isRerouting} onClick={handleAiReroute}>
+                <div className="flex flex-col gap-2">
+                  <Button variant="primary" size="sm" className="w-full" isLoading={isRerouting} onClick={handleAiReroute}>
                     <Zap className="w-3.5 h-3.5" /> AI Dynamic Reroute
                   </Button>
-                  <Button variant="secondary" size="sm" className="flex-1" isLoading={isDispatching} onClick={handleDispatchEPass}>
+                  <Button variant="secondary" size="sm" className="w-full" isLoading={isDispatching} onClick={handleDispatchEPass}>
                     Dispatch e-Pass
-                  </Button>
-                  <Button variant="ghost" size="sm" className="flex-1" onClick={() => setSelectedTruck(null)}>
-                    Close
                   </Button>
                 </div>
               </motion.div>

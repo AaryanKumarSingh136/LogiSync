@@ -29,6 +29,21 @@ def get_db():
         db.close()
 
 
+def ensure_user_columns():
+    """Additive migration for dispatcher vehicle_type (existing DBs lack it)."""
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        try:
+            if _is_sqlite:
+                cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()]
+                if "vehicle_type" not in cols:
+                    conn.exec_driver_sql("ALTER TABLE users ADD COLUMN vehicle_type VARCHAR(32)")
+            else:
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS vehicle_type VARCHAR(32)"))
+        except Exception:
+            pass
+
+
 def ensure_port_columns():
     """Versioned startup migration for the multi-port rollout.
 

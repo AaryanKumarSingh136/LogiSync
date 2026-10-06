@@ -30,8 +30,14 @@ def test_security_headers():
     assert "Strict-Transport-Security" in response.headers
 
 
+def _auth_headers():
+    r = client.post("/api/auth/login", json={"identifier": "admin@logisync.ai", "password": "Admin@123"})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
 def test_slot_congestion_matrix():
-    response = client.get("/api/slots/congestion")
+    response = client.get("/api/slots/congestion", headers=_auth_headers())
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 4

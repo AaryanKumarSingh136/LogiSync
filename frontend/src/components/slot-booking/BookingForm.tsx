@@ -1,16 +1,18 @@
 // ─── BookingForm — multi-section booking form in dark navy panel style ─────────
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, Sparkles, Zap, Truck, User, Phone, RefreshCw } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Button } from '../ui/Button';
 import { DateScrubber } from './DateScrubber';
 import { DestinationAutocomplete } from './DestinationAutocomplete';
+import { useAuth } from '../../context/AuthContext';
 import { PORT_SERVICE_MAP, PORT_DATE_DENSITY } from '../../data/portServiceData';
 import type {
   ServiceType, VehicleType, PriorityTier, BookingRecord,
 } from '../../data/portServiceData';
 import type { PortInfo } from '../../data/ports';
+import { createBooking } from '../../services/api';
 
 // ── AI suggestions ────────────────────────────────────────────────────────────
 export interface AiSlot {
@@ -263,19 +265,52 @@ function dateStr(offset: number): string {
 let seqCounter = 100;
 
 export function BookingForm({ port, onBookingConfirmed }: BookingFormProps) {
+  const { user } = useAuth();
+
+  // Map account vehicle_type (incl. legacy pre-taxonomy values) to tiles
+  const accountVehicleType = useMemo<VehicleType>(() => {
+    const map: Record<string, VehicleType> = {
+      trailer: 'trailer', container_truck: 'container_truck', reefer_truck: 'reefer_truck',
+      flatbed: 'flatbed', tanker: 'tanker',
+      container_reefer: 'container_truck',
+    };
+    return (user?.vehicle_type && map[user.vehicle_type]) || 'container_truck';
+  }, [user?.vehicle_type]);
+
+  const accountPlate = useMemo(() => (user?.vehicle_number || '').toUpperCase(), [user?.vehicle_number]);
+  const accountName = user?.name || '';
+  const accountPhone = user?.mobile_number || '+91 98400 12345';
+
   const [service, setService] = useState<ServiceType>('container_reefer');
   const [gateIndex, setGateIndex] = useState(0);
   const [dateOffset, setDateOffset] = useState(0);
-  const [vehicleNum, setVehicleNum] = useState('');
-  const [vehicleType, setVehicleType] = useState<VehicleType>('container_truck');
-  const [driverName, setDriverName] = useState('');
-  const [driverPhone, setDriverPhone] = useState('+91 98400 12345');
+  const [vehicleNum, setVehicleNum] = useState(accountPlate);
+  const [vehicleType, setVehicleType] = useState<VehicleType>(accountVehicleType);
+  const [driverName, setDriverName] = useState(accountName);
+  const [driverPhone, setDriverPhone] = useState(accountPhone);
   const [destination, setDestination] = useState('');
   const [tier, setTier] = useState<PriorityTier>('express');
   const [showAi, setShowAi] = useState(false);
   const [selectedAiSlot, setSelectedAiSlot] = useState<string | null>(null);
   const [isBooking, setIsBooking] = useState(false);
   const [bookingSuccess, setBookingSuccess] = useState(false);
+
+  // One-shot auto-fill when the account resolves after mount — user edits win after that
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (prefilled.current || !user) return;
+    prefilled.current = true;
+    setVehicleNum((user.vehicle_number || '').toUpperCase());
+    const map: Record<string, VehicleType> = {
+      trailer: 'trailer', container_truck: 'container_truck', reefer_truck: 'reefer_truck',
+      flatbed: 'flatbed', tanker: 'tanker',
+      container_reefer: 'container_truck',
+    };
+    const vt = user.vehicle_type ? map[user.vehicle_type] : undefined;
+    if (vt) setVehicleType(vt);
+    if (user.name) setDriverName(user.name);
+    if (user.mobile_number) setDriverPhone(user.mobile_number);
+  }, [user]);
 
   const services = port ? PORT_SERVICE_MAP[port.id] ?? [] : [];
   const currentService = services.find(s => s.service === service) ?? services[0];
@@ -359,11 +394,23 @@ export function BookingForm({ port, onBookingConfirmed }: BookingFormProps) {
     await new Promise(r => setTimeout(r, 600));
     setBookingSuccess(false);
     onBookingConfirmed(booking);
+    // Persist server-side tagged with dispatcher_id = current user (fire-and-forget)
+    try {
+      await createBooking({
+        port_id: port.id, service_type: service, gate_id: gate.gateName,
+        vehicle_number: vehicleNum.toUpperCase(), vehicle_type: vehicleType,
+        origin_port_id: port.id, delivery_destination: destination.trim(),
+        reserved_date: dateStr(dateOffset), reserved_time_start: finalTime,
+        reserved_time_end: addMins(finalTime, 30),
+        priority_tier: tier,
+      });
+    } catch { /* offline/demo: local booking still shown */ }
 
-    // Reset form
-    setVehicleNum('');
-    setDriverName('');
-    setDriverPhone('+91 98400 12345');
+    // Reset form — restore account values so the next booking stays prefilled
+    setVehicleNum(accountPlate);
+    setVehicleType(accountVehicleType);
+    setDriverName(accountName);
+    setDriverPhone(accountPhone);
     setDestination('');
     setSelectedAiSlot(null);
     setShowAi(false);
@@ -471,6 +518,7 @@ export function BookingForm({ port, onBookingConfirmed }: BookingFormProps) {
         <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
           Vehicle Number &amp; Type <span className="text-rose-500 font-black">*</span>
         </label>
+        <p className="text-[10px] text-slate-400 dark:text-slate-500 mb-1.5">Prefilled from your account — editable per booking.</p>
         <div className="flex items-center gap-2 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-white/70 dark:border-white/10 px-3.5 py-2.5 mb-2">
           <Truck className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
           <input

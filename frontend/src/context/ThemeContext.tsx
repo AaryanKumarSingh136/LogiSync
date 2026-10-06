@@ -11,16 +11,23 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>('light');
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === 'undefined') return 'light';
+    const stored = localStorage.getItem('logisync-theme') as Theme | null;
+    if (stored === 'light' || stored === 'dark') return stored;
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
 
   useEffect(() => {
-    // Read from localStorage — default is light
-    const stored = localStorage.getItem('logisync-theme') as Theme | null;
-    if (stored === 'dark') {
-      setTheme('dark');
+    // Sync theme to <html> class and colorScheme attribute
+    if (theme === 'dark') {
       document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
-  }, []);
+    document.documentElement.style.colorScheme = theme;
+    localStorage.setItem('logisync-theme', theme);
+  }, [theme]);
 
   const toggleTheme = useCallback(() => {
     setTheme(prev => {
@@ -30,6 +37,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       } else {
         document.documentElement.classList.remove('dark');
       }
+      document.documentElement.style.colorScheme = next;
       localStorage.setItem('logisync-theme', next);
       return next;
     });

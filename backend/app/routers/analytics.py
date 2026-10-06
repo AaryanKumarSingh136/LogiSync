@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.dependencies import get_current_user
 from app.ports import DEFAULT_PORT_ID, is_valid_port
+from app.data.port_analytics_seed import get_port_analytics
 import hashlib
 
 router = APIRouter(prefix="/analytics", tags=["Analytics & Predictive BI"], dependencies=[Depends(get_current_user)])
@@ -26,6 +27,30 @@ def _port_factor(port_id: str) -> float:
     return round(0.7 + (h % 60) / 100.0, 3)
 
 
+def _period_scale(period: Optional[str], port_id: str) -> float:
+    """Deterministic period multiplier so 24h/7d/30d differ but stay stable."""
+    p = (period or '24h').lower()
+    if p in ('monthly', '30d', 'month'):
+        base = 24.0
+    elif p in ('7d', '7day', 'week', 'last7d'):
+        base = 6.4
+    else:
+        return 1.0
+    h = int(hashlib.md5(f"per-{port_id}-{p}".encode()).hexdigest(), 16)
+    jitter = 0.92 + (h % 16) / 100.0
+    return round(base * jitter, 3)
+
+
+def _resolve_port(port: Optional[str], user: Dict[str, Any]) -> str:
+    """Fleet managers are locked to assigned_port_id; admins may pass any port."""
+    if isinstance(user, dict) and user.get('role') == 'fleet_manager':
+        assigned = user.get('assigned_port_id') or DEFAULT_PORT_ID
+        if port and port != assigned:
+            raise HTTPException(status_code=403, detail='Fleet managers limited to assigned port.')
+        return _require_port(assigned)
+    return _require_port(port)
+
+
 class SimulationRequest(BaseModel):
     num_trucks: Optional[int] = 100
     arrival_distribution: Optional[str] = "poisson"
@@ -38,29 +63,30 @@ class SimulationRequest(BaseModel):
 def get_kpis(
     period: Optional[str] = Query("24h"),
     port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)"),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Returns top-level port performance KPIs with comparison against baseline."""
-    port_id = _require_port(port)
-    f = _port_factor(port_id)
-    # Scale slightly based on period
-    scale = 1.0
-    if period == "7d":
-        scale = 7.0
-    elif period == "30d":
-        scale = 30.0
+    """Returns top-level port performance KPIs — distinct seed per port + period."""
+    port_id = _resolve_port(port, user)
+    seed = get_port_analytics(port_id)
+    scale = _period_scale(period, port_id)
+    h = int(hashlib.md5(f"kpi-{port_id}-{period}".encode()).hexdigest(), 16)
+    wait_adj = 0.9 + (h % 20) / 100.0
+    util_adj = 0.94 + (h % 12) / 100.0
 
     return {
-        "avg_queue_wait_min": round((14.2 if period == "24h" else (16.8 if period == "7d" else 15.5)) * f, 1),
-        "avg_queue_wait_delta": -34.8,  # -34.8% reduction
-        "gate_utilization_pct": round((78.5 if period == "24h" else (82.1 if period == "7d" else 80.4)) * min(f, 1.15), 1),
-        "gate_utilization_delta": 12.3,
-        "reroutes_triggered_today": int(23 * scale * f),
-        "fuel_saved_litres_today": round(142.5 * scale * f, 1),
-        "co2_saved_kg_today": round(381.9 * scale * f, 1),
-        "slot_adherence_pct": round(max(62.0, min(98.5, 91.4 + (1.0 - f) * 20.0)), 1),
-        "active_trucks_in_port": int((142 if period == "24h" else 156) * f),
-        "turnaround_time_baseline_min": 58,
-        "turnaround_time_current_min": 31,
+        "avg_queue_wait_min": round(seed["avg_queue_wait"] * wait_adj, 1),
+        "avg_queue_wait_delta": round(-18 - (h % 25) - (scale - 1.0) * 0.4, 1),
+        "gate_utilization_pct": round(max(35, min(98, seed["gate_util"] * util_adj)), 1),
+        "gate_utilization_delta": round(6 + (h % 12) + (scale - 1.0) * 0.15, 1),
+        "reroutes_triggered_today": int(seed["reroutes"] * scale),
+        "fuel_saved_litres_today": round(seed["fuel_l"] * scale, 1),
+        "co2_saved_kg_today": round(seed["co2_kg"] * scale, 1),
+        "slot_adherence_pct": round(max(60, min(99, seed["adherence"] + (h % 7) - 3)), 1),
+        "active_trucks_in_port": int(142 * scale * (seed["gate_util"] / 78.5)),
+        "turnaround_time_baseline_min": round(58 * wait_adj, 1),
+        "turnaround_time_current_min": round(31 * wait_adj, 1),
+        "cargo_mix": seed.get("cargo_mix"),
+        "trend": seed.get("trend"),
     }
 
 
@@ -68,13 +94,20 @@ def get_kpis(
 def get_congestion_heatmap(
     period: Optional[str] = Query("24h"),
     port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)"),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Hourly congestion scores per gate (0-100 scale)."""
+    """Hourly congestion scores per gate (0-100 scale). Period-aware."""
     from app.ports import PORTS
-    port_id = _require_port(port)
+    port_id = _resolve_port(port, user)
     f = _port_factor(port_id)
+    p = (period or '24h').lower()
+    if p in ('7d', 'week'):
+        hours = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    elif p in ('30d', 'monthly', 'month'):
+        hours = [f"D{i+1}" for i in range(10)]
+    else:
+        hours = ["06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"]
     gates = PORTS[port_id]["gates"] if port_id != DEFAULT_PORT_ID else ["Gate 1 (Bulk)", "Gate 2 (General)", "Gate 3 (Container)", "Gate 4 (Rail)"]
-    hours = ["06:00", "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"]
 
     # Generate realistic patterns
     base_scores = {
@@ -86,10 +119,13 @@ def get_congestion_heatmap(
     legacy_keys = list(base_scores.keys())
 
     data = []
+    ph = int(hashlib.md5(f"heat-{port_id}-{period}".encode()).hexdigest(), 16)
+    pf = 0.85 + (ph % 30) / 100.0
     for g_idx, gate in enumerate(gates):
         pattern = base_scores[legacy_keys[g_idx % len(legacy_keys)]]
         for h_idx, hour in enumerate(hours):
-            score = max(5, min(99, int(pattern[h_idx] * f)))
+            base = pattern[h_idx % len(pattern)]
+            score = max(5, min(99, int(base * f * pf)))
             data.append({
                 "gate": gate,
                 "gate_index": g_idx,
@@ -97,27 +133,47 @@ def get_congestion_heatmap(
                 "hour_index": h_idx,
                 "score": score
             })
-    return {"gates": gates, "hours": hours, "data": data}
+    return {"gates": gates, "hours": hours, "data": data, "period": period}
 
 
 @router.get("/charts/turnaround")
 def get_turnaround_chart(
     period: Optional[str] = Query("7d"),
     port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)"),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Actual vs AI-Predicted turnaround times across days."""
-    f = _port_factor(_require_port(port))
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    actual = [round(v * f, 1) for v in [34.5, 32.0, 29.8, 31.2, 33.6, 28.4, 27.0]]
-    predicted = [round(v * f, 1) for v in [33.0, 31.5, 30.2, 30.8, 32.5, 28.0, 26.5]]
-    baseline_unoptimized = [round(v * f, 1) for v in [56.0, 58.2, 55.4, 59.1, 62.0, 52.3, 49.0]]
+    """Actual vs AI-Predicted turnaround times. Period-aware labels."""
+    port_id = _resolve_port(port, user)
+    f = _port_factor(port_id)
+    p = (period or '7d').lower()
+    th = int(hashlib.md5(f"turn-{port_id}-{p}".encode()).hexdigest(), 16)
+    tf = 0.88 + (th % 24) / 100.0
+    if p in ('24h', 'live', 'day'):
+        days = ["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"]
+        base_a = [34.5, 36.2, 42.8, 48.5, 39.0, 30.2]
+        base_p = [33.0, 35.0, 40.5, 45.0, 37.2, 29.0]
+        base_b = [56.0, 60.2, 72.4, 78.1, 65.0, 52.3]
+    elif p in ('30d', 'monthly', 'month'):
+        days = [f"W{i+1}" for i in range(8)]
+        base_a = [34.5, 32.0, 29.8, 31.2, 33.6, 28.4, 27.0, 26.2]
+        base_p = [33.0, 31.5, 30.2, 30.8, 32.5, 28.0, 26.5, 25.8]
+        base_b = [56.0, 58.2, 55.4, 59.1, 62.0, 52.3, 49.0, 48.2]
+    else:
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        base_a = [34.5, 32.0, 29.8, 31.2, 33.6, 28.4, 27.0]
+        base_p = [33.0, 31.5, 30.2, 30.8, 32.5, 28.0, 26.5]
+        base_b = [56.0, 58.2, 55.4, 59.1, 62.0, 52.3, 49.0]
+    actual = [round(v * f * tf, 1) for v in base_a]
+    predicted = [round(v * f * tf, 1) for v in base_p]
+    baseline_unoptimized = [round(v * f * tf, 1) for v in base_b]
 
     return {
         "categories": days,
         "actual": actual,
         "predicted": predicted,
         "baseline_unoptimized": baseline_unoptimized,
-        "unit": "minutes"
+        "unit": "minutes",
+        "period": period,
     }
 
 
@@ -125,27 +181,51 @@ def get_turnaround_chart(
 def get_queue_depth_chart(
     gate: Optional[str] = Query(None),
     port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)"),
+    period: Optional[str] = Query("24h"),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Queue depth and throughput over time."""
-    f = _port_factor(_require_port(port))
-    times = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"]
-    scale = lambda xs: [max(0, int(v * f)) for v in xs]
+    """Queue depth and throughput over time. Period-aware."""
+    port_id = _resolve_port(port, user)
+    f = _port_factor(port_id)
+    p = (period or '24h').lower()
+    qh = int(hashlib.md5(f"queue-{port_id}-{p}".encode()).hexdigest(), 16)
+    qf = (0.8 + (qh % 40) / 100.0) * _period_scale('24h' if p == '24h' else '7d' if p == '7d' else '30d', port_id) / (1.0 if p == '24h' else 6.4 if p == '7d' else 24.0) * (1.0 if p == '24h' else 6.4 if p == '7d' else 24.0) ** 0.35
+    if p in ('7d', 'week'):
+        times = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        b1, b2, b3, b4 = [9, 14, 18, 16, 20, 12, 8], [7, 10, 12, 11, 13, 8, 5], [3, 5, 6, 5, 6, 4, 2], [10, 14, 18, 17, 19, 12, 8]
+        bt = [68, 82, 95, 90, 98, 75, 60]
+    elif p in ('30d', 'monthly', 'month'):
+        times = [f"W{i+1}" for i in range(8)]
+        b1, b2, b3, b4 = [12, 15, 18, 22, 19, 16, 14, 11], [9, 11, 14, 16, 13, 11, 9, 7], [4, 5, 7, 8, 6, 5, 4, 3], [13, 16, 20, 24, 21, 17, 14, 11]
+        bt = [80, 88, 102, 110, 100, 90, 82, 70]
+    else:
+        times = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00"]
+        b1, b2, b3, b4 = [5, 8, 12, 14, 11, 7, 6, 8, 5, 3], [4, 6, 9, 10, 8, 6, 5, 6, 4, 2], [2, 4, 3, 2, 4, 3, 2, 3, 2, 1], [6, 9, 15, 16, 12, 8, 7, 9, 6, 4]
+        bt = [42, 65, 88, 92, 84, 76, 82, 85, 68, 45]
+    scale = lambda xs: [max(0, int(v * f * qf)) for v in xs]
     return {
         "timestamps": times,
-        "g1": scale([5, 8, 12, 14, 11, 7, 6, 8, 5, 3]),
-        "g2": scale([4, 6, 9, 10, 8, 6, 5, 6, 4, 2]),
-        "g3": scale([2, 4, 3, 2, 4, 3, 2, 3, 2, 1]),
-        "g4": scale([6, 9, 15, 16, 12, 8, 7, 9, 6, 4]),
-        "throughput_vehicles_per_hr": scale([42, 65, 88, 92, 84, 76, 82, 85, 68, 45])
+        "g1": scale(b1),
+        "g2": scale(b2),
+        "g3": scale(b3),
+        "g4": scale(b4),
+        "throughput_vehicles_per_hr": scale(bt),
+        "period": period,
     }
 
 
 @router.get("/charts/reroute-impact")
-def get_reroute_impact_chart(port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)")):
-    """Before/after reroute corridor performance metrics."""
+def get_reroute_impact_chart(
+    port: Optional[str] = Query(None, description="Port id (e.g. voc, vizag)"),
+    period: Optional[str] = Query("24h"),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Before/after reroute corridor performance metrics. Period-aware."""
     from app.ports import PORTS
-    port_id = _require_port(port)
+    port_id = _resolve_port(port, user)
     f = _port_factor(port_id)
+    rh = int(hashlib.md5(f"reroute-{port_id}-{period}".encode()).hexdigest(), 16)
+    rf = 0.9 + (rh % 20) / 100.0
     if port_id == DEFAULT_PORT_ID:
         corridors = [
             "Madurai Hwy (NH 38)",
@@ -163,13 +243,14 @@ def get_reroute_impact_chart(port: Optional[str] = Query(None, description="Port
             "Port Approach Rd",
             "Port Gate 3 Approach"
         ]
-    scale = lambda xs: [round(v * f, 1) for v in xs]
+    scale = lambda xs: [round(v * f * rf, 1) for v in xs]
     return {
         "corridors": corridors,
         "without_ai_wait_min": scale([38.5, 29.0, 24.5, 31.0, 42.0]),
         "with_ai_wait_min": scale([18.2, 16.5, 14.0, 15.8, 19.5]),
         "fuel_saved_pct": [32.4, 28.5, 22.0, 27.8, 35.2],
-        "co2_reduction_pct": [34.0, 29.2, 23.5, 29.0, 36.8]
+        "co2_reduction_pct": [34.0, 29.2, 23.5, 29.0, 36.8],
+        "period": period,
     }
 
 

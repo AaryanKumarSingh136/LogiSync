@@ -1,4 +1,6 @@
 from app.routers.auth import router as auth_router
+from app.routers.bookings import router as bookings_router
+from app.routers.admin import router as admin_router
 from app.routers.maps import router as maps_router
 from app.routers.slots import router as slots_router
 from app.routers.fleet import router as fleet_router
@@ -11,6 +13,8 @@ from app.routers.ports import router as ports_router
 
 __all__ = [
     "auth_router",
+    "bookings_router",
+    "admin_router",
     "maps_router",
     "slots_router",
     "fleet_router",

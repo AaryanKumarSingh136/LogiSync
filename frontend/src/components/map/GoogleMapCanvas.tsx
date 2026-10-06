@@ -89,8 +89,15 @@ export function GoogleMapCanvas({
     mapInstance.current = map;
 
     onMapReady?.(map);
+    // Fix narrow/blur gutters: force Leaflet to recalc after flex layout settles
+    requestAnimationFrame(() => { try { map.invalidateSize(); } catch {} });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => { try { map.invalidateSize(); } catch {} }) : null;
+    if (ro && mapContainerRef.current) ro.observe(mapContainerRef.current);
+    const t = setTimeout(() => { try { map.invalidateSize(); } catch {} }, 350);
 
     return () => {
+      clearTimeout(t);
+      ro?.disconnect();
       map.remove();
       mapInstance.current = null;
     };
@@ -101,7 +108,10 @@ export function GoogleMapCanvas({
   const centerLat = center.lat;
   const centerLng = center.lng;
   useEffect(() => {
-    mapInstance.current?.setView([centerLat, centerLng], zoom);
+    try {
+      mapInstance.current?.setView([centerLat, centerLng], zoom);
+      mapInstance.current?.invalidateSize();
+    } catch {}
   }, [centerLat, centerLng, zoom]);
 
   // Update tile layer on theme or mode switch
@@ -134,11 +144,11 @@ export function GoogleMapCanvas({
       {/* Leaflet Map Div */}
       <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-0" />
 
-      {/* Map Mode Switcher — minimal white control */}
+      {/* Map Mode Switcher — minimal white control (kept below header dropdowns) */}
       <div
         role="group"
         aria-label="Map style"
-        className="absolute top-4 right-4 z-10 flex items-center gap-1 p-1 rounded-2xl bg-white/95 dark:bg-[#101828]/95 border border-[#E8E8E5] dark:border-white/10 backdrop-blur-xl"
+        className="absolute top-4 right-4 z-[5] flex items-center gap-1 p-1 rounded-2xl bg-white/95 dark:bg-[#101828]/95 border border-[#E8E8E5] dark:border-white/10 backdrop-blur-xl"
         style={{ boxShadow: 'var(--shadow-2)' }}
       >
         {MAP_MODES.map(m => (

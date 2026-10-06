@@ -9,6 +9,7 @@ import { useToast } from '../../context/ToastContext';
 import { useTheme } from '../../context/ThemeContext';
 import type { BookingRecord } from '../../data/portServiceData';
 import { getPort } from '../../data/ports';
+import { geocodePlace, saveStoredRoute } from '../../services/api';
 
 const GEOAPIFY_API_KEY = import.meta.env.VITE_GEOAPIFY_API_KEY || '';
 
@@ -66,23 +67,14 @@ interface FetchedRoute {
 interface RoutePanelProps {
   booking: BookingRecord | null;
   onClose: () => void;
+  /** Fired when the dispatcher picks a path for the home dashboard simulation. */
+  onSelectRoute?: (sel: {
+    bookingId: string; tokenNumber: string; label: string; color: string;
+    distanceKm: number; etaMin: number; latlngs: [number, number][]; dest: [number, number];
+  }) => void;
 }
 
-// Geocode a place name → lat/lng using Geoapify
-async function geocodePlace(place: string): Promise<[number, number] | null> {
-  try {
-    const res = await fetch(
-      `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(place)}&limit=1&apiKey=${GEOAPIFY_API_KEY}`
-    );
-    const data = await res.json();
-    const feat = data?.features?.[0];
-    if (!feat) return null;
-    const [lng, lat] = feat.geometry.coordinates;
-    return [lat, lng];
-  } catch {
-    return null;
-  }
-}
+// Geocode a place name → lat/lng (shared helper in services/api)
 
 // Fetch a real road route between two points using Geoapify Routing API
 async function fetchGeoapifyRoute(
@@ -111,7 +103,7 @@ async function fetchGeoapifyRoute(
   }
 }
 
-export function RoutePanel({ booking, onClose }: RoutePanelProps) {
+export function RoutePanel({ booking, onClose, onSelectRoute }: RoutePanelProps) {
   const { showToast } = useToast();
   const { isDark } = useTheme();
   const [activeRouteIndex, setActiveRouteIndex] = useState<number>(0);
@@ -135,10 +127,11 @@ export function RoutePanel({ booking, onClose }: RoutePanelProps) {
       if (coords) {
         setDestCoords(coords);
       } else {
-        // Fallback: place destination ~200km from port in a random direction
+        // Deterministic fallback: fixed offset from the port (never random —
+        // the home simulation must reproduce the same path every load)
         const portLat = getPort(booking.portId).lat;
         const portLng = getPort(booking.portId).lng;
-        setDestCoords([portLat + (Math.random() - 0.5) * 3, portLng + (Math.random() - 0.5) * 3]);
+        setDestCoords([portLat - 1.1, portLng + 1.4]);
         showToast({ type: 'warning', title: 'Geocode Notice', message: `Could not pinpoint "${booking.destination}". Showing approximate route.` });
       }
     });
@@ -274,13 +267,42 @@ export function RoutePanel({ booking, onClose }: RoutePanelProps) {
     setActiveRouteIndex(index);
     const route = routes[index];
     const opt = ROUTE_OPTIONS[index];
-    if (route) {
+    if (route && booking) {
+      // Persist per booking so the home dashboard simulates this exact path
+      saveStoredRoute({
+        bookingId: booking.id,
+        tokenNumber: booking.tokenNumber,
+        label: opt.name,
+        color: opt.color,
+        distanceKm: route.distanceKm,
+        etaMin: route.etaMin,
+        latlngs: route.latlngs,
+        dest: destCoords || route.latlngs[route.latlngs.length - 1],
+      });
       showToast({
         type: 'success',
         title: 'Route Selected',
         message: `${opt.name} — ${route.distanceKm} km, ~${Math.floor(route.etaMin / 60)}h ${route.etaMin % 60}m`,
       });
     }
+  };
+
+  const handleShowOnHome = () => {
+    const route = routes[activeRouteIndex];
+    const opt = ROUTE_OPTIONS[activeRouteIndex];
+    if (!route || !booking) return;
+    const sel = {
+      bookingId: booking.id,
+      tokenNumber: booking.tokenNumber,
+      label: opt.name,
+      color: opt.color,
+      distanceKm: route.distanceKm,
+      etaMin: route.etaMin,
+      latlngs: route.latlngs,
+      dest: destCoords || route.latlngs[route.latlngs.length - 1],
+    };
+    saveStoredRoute(sel);
+    onSelectRoute?.(sel);
   };
 
   const activeRoute = routes[activeRouteIndex];
@@ -438,14 +460,19 @@ export function RoutePanel({ booking, onClose }: RoutePanelProps) {
               </div>
 
               {/* Footer */}
-              <div className="px-5 py-3.5 border-t border-slate-200/60 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.02] flex items-center justify-between flex-shrink-0">
-                <span className="text-[10px] text-slate-400 font-mono">
+              <div className="px-5 py-3.5 border-t border-slate-200/60 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.02] flex items-center justify-between gap-2 flex-shrink-0">
+                <span className="text-[10px] text-slate-400 font-mono min-w-0 truncate">
                   {activeRoute
                     ? `${activeOpt.name} · ${activeRoute.distanceKm} km · ~${Math.floor(activeRoute.etaMin / 60)}h ${activeRoute.etaMin % 60}m ETA`
                     : loadingRoute ? 'Fetching routes via Geoapify…' : 'Select a route above'
                   }
                 </span>
-                <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <Button variant="primary" size="sm" onClick={handleShowOnHome} disabled={!activeRoute}>
+                    Show on Home →
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
+                </div>
               </div>
             </motion.div>
           </div>

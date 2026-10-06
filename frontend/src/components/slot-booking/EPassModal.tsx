@@ -1,7 +1,10 @@
-// ─── EPassModal — Transit e-Pass artifact with print/download support ──────────
+// ─── EPassModal — Transit e-Pass artifact with real QR + PDF download ──────────
+import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Download, QrCode, Shield, Anchor } from 'lucide-react';
 import { clsx } from 'clsx';
+import { jsPDF } from 'jspdf';
+import QRCode from 'qrcode';
 import { Button } from '../ui/Button';
 import type { BookingRecord } from '../../data/portServiceData';
 import { getPort } from '../../data/ports';
@@ -25,28 +28,84 @@ interface EPassModalProps {
   onClose: () => void;
 }
 
-function QRPlaceholder({ token }: { token: string }) {
-  // Simple visual QR placeholder — grid of dots
-  const seed = token.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-  const grid = Array.from({ length: 9 }, (_, r) =>
-    Array.from({ length: 9 }, (_, c) => (((seed + r * 7 + c * 13) % 3) !== 0))
-  );
-  return (
-    <div className="w-20 h-20 bg-white rounded-lg p-1.5 flex-shrink-0">
-      <div className="grid grid-cols-9 gap-px w-full h-full">
-        {grid.flat().map((filled, i) => (
-          <div key={i} className={clsx('rounded-[1px]', filled ? 'bg-slate-900' : 'bg-white')} />
-        ))}
+export function epassQrPayload(booking: BookingRecord): string {
+  return `LOGISYNC-EPASS|${booking.tokenNumber}|${booking.portId}|${booking.date}|${booking.timeWindow}|${booking.vehicleNumber}`;
+}
+
+export async function epassQrDataUrl(booking: BookingRecord): Promise<string> {
+  try {
+    return await QRCode.toDataURL(epassQrPayload(booking), { width: 220, margin: 1 });
+  } catch {
+    return '';
+  }
+}
+
+function RealQr({ booking }: { booking: BookingRecord }) {
+  const [url, setUrl] = useState('');
+  useEffect(() => {
+    let live = true;
+    epassQrDataUrl(booking).then(u => { if (live) setUrl(u); });
+    return () => { live = false; };
+  }, [booking]);
+  if (!url) {
+    return (
+      <div className="w-20 h-20 bg-white rounded-lg flex-shrink-0 flex items-center justify-center">
+        <QrCode className="w-8 h-8 text-slate-300 animate-pulse" />
       </div>
-    </div>
-  );
+    );
+  }
+  return <img src={url} alt="e-Pass QR code" className="w-20 h-20 bg-white rounded-lg p-1 flex-shrink-0" />;
 }
 
 export function EPassModal({ booking, onClose }: EPassModalProps) {
   const port = booking ? getPort(booking.portId) : null;
 
-  const handleDownload = () => {
-    window.print();
+  const handleDownload = async () => {
+    const doc = new jsPDF();
+    let y = 18;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(20, 40, 70);
+    doc.text('LogiSync — Transit e-Pass', 10, y);
+    y += 8;
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(80, 80, 80);
+    doc.text(`${port?.name || ''} (${port?.locode || ''})`, 10, y);
+    y += 10;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.setTextColor(0, 0, 0);
+    doc.text(`Token: ${booking.tokenNumber}`, 10, y);
+    y += 10;
+
+    const qr = await epassQrDataUrl(booking);
+    const textX = qr ? 62 : 10;
+    if (qr) {
+      try { doc.addImage(qr, 'PNG', 10, y, 45, 45); } catch { /* skip QR */ }
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    const rows: [string, string][] = [
+      ['Origin', `${port?.name || ''} — ${port?.city || ''}`],
+      ['Destination', booking.destination],
+      ['Gate & Service', `${booking.gate} · ${booking.serviceLabel}`],
+      ['Reserved Window', `${booking.date} · ${booking.timeWindow}`],
+      ['Vehicle', `${booking.vehicleNumber} · ${VEH_LABELS[booking.vehicleType] ?? booking.vehicleType}`],
+      ['Driver', `${booking.driverName}${booking.driverPhone ? ` · ${booking.driverPhone}` : ''}`],
+      ['Priority', `${booking.tier} · ${booking.tierFee === 0 ? 'Rs 0' : `Rs ${booking.tierFee.toLocaleString('en-IN')}`}`],
+      ['Status', booking.status],
+    ];
+    rows.forEach(([k, v]) => {
+      doc.text(`${k}: ${v}`, textX, y + 5);
+      y += 7;
+    });
+    y += 6;
+    doc.setFontSize(9);
+    doc.setTextColor(120, 120, 120);
+    doc.text('Valid for reserved date · Fast-pass lane eligible', 10, y + 40);
+    doc.text(`Issued ${new Date().toLocaleString('en-IN')} IST`, 10, y + 46);
+    doc.save(`epass-${booking.tokenNumber}.pdf`);
   };
 
   return (
@@ -119,7 +178,7 @@ export function EPassModal({ booking, onClose }: EPassModalProps) {
                         {booking.tokenNumber}
                       </p>
                     </div>
-                    <QRPlaceholder token={booking.tokenNumber} />
+                    <RealQr booking={booking} />
                   </div>
 
                   {/* Info grid */}

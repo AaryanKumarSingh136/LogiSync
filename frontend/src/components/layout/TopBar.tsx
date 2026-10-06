@@ -48,6 +48,10 @@ export function TopBar() {
   // Ref on the bell button — used to position the dropdown panel
   const bellBtnRef = useRef<HTMLButtonElement>(null);
   const [panelPos, setPanelPos] = useState({ top: 0, right: 0 });
+  // Ref on the user pill — user menu renders via portal so map controls
+  // (Bright Map / Satellite) and Leaflet panes can never overlap or clip it.
+  const userBtnRef = useRef<HTMLButtonElement>(null);
+  const [userMenuPos, setUserMenuPos] = useState({ top: 0, right: 0 });
 
   // Load REST telemetry fallback
   useEffect(() => {
@@ -110,6 +114,40 @@ export function TopBar() {
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, [showNotifPanel]);
+
+  const openUserMenu = () => {
+    if (userBtnRef.current) {
+      const rect = userBtnRef.current.getBoundingClientRect();
+      setUserMenuPos({
+        top: rect.bottom + 8,
+        right: window.innerWidth - rect.right,
+      });
+    }
+    setShowUserMenu(p => !p);
+  };
+
+  // Close user menu on outside click / Escape (portal has no header ancestor)
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        !target.closest('[data-user-menu]') &&
+        !target.closest('[data-user-btn]')
+      ) {
+        setShowUserMenu(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowUserMenu(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showUserMenu]);
 
   const handleNotifClick = (id: string) => markRead(id);
 
@@ -254,53 +292,68 @@ export function TopBar() {
           {/* User Profile Pill */}
           <div className="relative">
             <button
-              onClick={() => setShowUserMenu(p => !p)}
+              ref={userBtnRef}
+              data-user-btn
+              onClick={openUserMenu}
               className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl
                 bg-white/70 dark:bg-slate-800/70 hover:bg-white dark:hover:bg-slate-800
                 border border-white/80 dark:border-white/10
                 neu-button transition-all duration-200"
             >
               <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-cyan-400 via-sky-500 to-indigo-600 flex items-center justify-center shadow-sm flex-shrink-0">
-                <span className="text-[10px] font-black text-white">
-                  {user?.name?.slice(0, 2) || 'KG'}
+                <span className="text-[10px] font-black text-white uppercase">
+                  {(user?.name?.slice(0, 2) || user?.email?.slice(0, 2) || 'US').toUpperCase()}
                 </span>
               </div>
               <div className="hidden md:block text-left">
                 <div className="text-[11px] font-bold text-slate-800 dark:text-slate-100">
-                  {user?.name?.split(' ')[0] || 'Karanesh G.'}
+                  {user?.name?.split(' ')[0] || 'User'}
                 </div>
-                <div className="text-[9px] text-cyan-600 dark:text-cyan-400 uppercase font-semibold">Port Admin</div>
+                <div className="text-[9px] text-cyan-600 dark:text-cyan-400 uppercase font-semibold">{user?.role?.replace('_', ' ') || 'Console'}</div>
               </div>
               <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
             </button>
-
-            {showUserMenu && (
-              <div className="absolute right-0 top-full mt-2 w-52 rounded-2xl liquid-glass-elevated
-                border border-white/60 dark:border-white/15 z-50 overflow-hidden shadow-2xl">
-                <div className="px-4 py-3 border-b border-slate-200/50 dark:border-slate-700/50 bg-white/40 dark:bg-slate-900/40">
-                  <div className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{user?.email}</div>
-                  <div className="flex items-center gap-1.5 mt-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 w-fit">
-                    <Shield className="w-3 h-3 text-emerald-500" />
-                    <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold tracking-wider">COGNITO AES-256</span>
-                  </div>
-                </div>
-                <button
-                  onClick={() => { setShowUserMenu(false); navigate('/settings'); }}
-                  className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors"
-                >
-                  Settings &amp; Preferences
-                </button>
-                <button
-                  onClick={() => { logout(); navigate('/login'); }}
-                  className="w-full text-left px-4 py-3 text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-500/10 transition-colors"
-                >
-                  Sign Out Console
-                </button>
-              </div>
-            )}
           </div>
         </div>
       </header>
+
+      {/* ── User menu — portal so it always floats above map controls ── */}
+      {showUserMenu && createPortal(
+        <div
+          data-user-menu
+          style={{
+            position: 'fixed',
+            top: userMenuPos.top,
+            right: userMenuPos.right,
+            width: 224,
+            zIndex: 9999,
+          }}
+          className="rounded-2xl liquid-glass-elevated
+            border border-white/60 dark:border-white/15 overflow-hidden shadow-2xl"
+        >
+          <div className="px-4 py-3 border-b border-slate-200/50 dark:border-slate-700/50 bg-white/40 dark:bg-slate-900/40">
+            <div className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{user?.email}</div>
+            <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate mt-0.5">{user?.name}</div>
+            <div className="flex items-center gap-1.5 mt-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 w-fit">
+              <Shield className="w-3 h-3 text-emerald-500" />
+              <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold tracking-wider">COGNITO AES-256</span>
+            </div>
+          </div>
+          <button
+            onClick={() => { setShowUserMenu(false); navigate('/settings'); }}
+            className="w-full text-left px-4 py-2.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors"
+          >
+            Settings &amp; Preferences
+          </button>
+          <button
+            onClick={() => { logout(); navigate('/'); }}
+            className="w-full text-left px-4 py-3 text-xs font-semibold text-red-600 dark:text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            Sign Out Console
+          </button>
+        </div>,
+        document.body
+      )}
 
       {/* ── Notification dropdown — rendered via portal so it's never clipped by header ── */}
       {showNotifPanel && createPortal(
