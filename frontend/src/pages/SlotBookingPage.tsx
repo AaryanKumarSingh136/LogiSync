@@ -1,5 +1,6 @@
 // ─── SlotBookingPage — Gate Slot Allocation & AI Dispatch (Redesign) ──────────
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { RefreshCw, Sparkles } from 'lucide-react';
 import { usePort } from '../context/PortContext';
 import { useToast } from '../context/ToastContext';
@@ -10,16 +11,14 @@ import { PortSelectorModal } from '../components/slot-booking/PortSelectorModal'
 import { ServiceGateOverview } from '../components/slot-booking/ServiceGateOverview';
 import { CongestionSection } from '../components/slot-booking/CongestionSection';
 import { SlotSchedulingZone } from '../components/slot-booking/SlotSchedulingZone';
-import { PORT_BOOKINGS } from '../data/portServiceData';
 import type { BookingRecord } from '../data/portServiceData';
 import { getPort } from '../data/ports';
-
-type SlotTab = 'how' | 'mine';
 
 export default function SlotBookingPage() {
   const { portId: globalPortId, setPortId } = usePort();
   const { showToast } = useToast();
   const { addNotification } = useNotifications();
+  const navigate = useNavigate();
 
   // ── Page-level state ─────────────────────────────────────────────────────
   const [selectedPortId, setSelectedPortId] = useState<string | null>(
@@ -27,29 +26,15 @@ export default function SlotBookingPage() {
   );
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [dateOffset, setDateOffset] = useState(0);
-  const [activeTab, setActiveTab] = useState<SlotTab>('how');
-  const [bookings, setBookings] = useState<BookingRecord[]>([]);
-  const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const port = selectedPortId ? getPort(selectedPortId) : null;
-
-  // Load seeded bookings when port changes
-  useEffect(() => {
-    if (selectedPortId) {
-      const seeded = PORT_BOOKINGS[selectedPortId] ?? [];
-      setBookings([...seeded]);
-    } else {
-      setBookings([]);
-    }
-  }, [selectedPortId]);
 
   // ── Port selection handlers ───────────────────────────────────────────────
   const handlePortSelect = (id: string) => {
     setSelectedPortId(id);
     setPortId(id); // sync global context
     setIsModalOpen(false);
-    setActiveTab('how');
     setDateOffset(0);
     showToast({
       type: 'success',
@@ -60,18 +45,14 @@ export default function SlotBookingPage() {
 
   const handlePortClear = () => {
     setSelectedPortId(null);
-    setBookings([]);
-    setActiveTab('how');
   };
 
   // ── Booking handlers ─────────────────────────────────────────────────────
   const handleBookingConfirmed = (booking: BookingRecord) => {
-    setBookings(prev => [booking, ...prev]);
-    setActiveTab('mine'); // switch to My Bookings tab
     showToast({
       type: 'success',
       title: 'Slot Confirmed!',
-      message: `e-Pass ${booking.tokenNumber} issued. Token copied to My Bookings.`,
+      message: `e-Pass ${booking.tokenNumber} issued. Opening My Bookings.`,
     });
     // Dispatch notification to the TopBar bell feed
     addNotification({
@@ -80,30 +61,8 @@ export default function SlotBookingPage() {
       body: `${booking.driverName} · ${booking.vehicleNumber} · ${booking.gate} · ${booking.timeWindow} on ${booking.date}`,
       bookingDetails: booking,
     });
-  };
-
-  const handleReschedule = (id: string) => {
-    // Simple demo: bump the time window by 30 mins
-    setBookings(prev => prev.map(b => {
-      if (b.id !== id) return b;
-      const [start] = b.timeWindow.split(' – ');
-      const [h, m] = start.split(':').map(Number);
-      const newH = String((h + (m >= 30 ? 1 : 0)) % 24).padStart(2, '0');
-      const newM = String((m + 30) % 60).padStart(2, '0');
-      const newStart = `${newH}:${newM}`;
-      const newEnd = `${String((Number(newH) + (Number(newM) >= 30 ? 1 : 0)) % 24).padStart(2, '0')}:${String((Number(newM) + 30) % 60).padStart(2, '0')}`;
-      return { ...b, timeWindow: `${newStart} – ${newEnd}` };
-    }));
-    showToast({ type: 'success', title: 'Rescheduled', message: 'Slot time updated by +30 minutes.' });
-  };
-
-  const handleCancel = async (id: string) => {
-    if (!window.confirm('Cancel this gate slot? This action cannot be undone.')) return;
-    setCancellingId(id);
-    await new Promise(r => setTimeout(r, 800));
-    setBookings(prev => prev.filter(b => b.id !== id));
-    setCancellingId(null);
-    showToast({ type: 'success', title: 'Slot Cancelled', message: 'Gate capacity released.' });
+    // Bookings live in the separate My Bookings panel
+    navigate('/my-bookings');
   };
 
   const handleRefresh = async () => {
@@ -187,13 +146,7 @@ export default function SlotBookingPage() {
           </div>
           <SlotSchedulingZone
             port={port}
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            bookings={bookings}
             onBookingConfirmed={handleBookingConfirmed}
-            onReschedule={handleReschedule}
-            onCancel={handleCancel}
-            cancellingId={cancellingId}
           />
         </div>
 

@@ -8,7 +8,14 @@ export interface AuthUser {
   name: string;
   role: UserRole;
   groups: string[];
+  assigned_port_id?: string | null;
+  must_change_password?: boolean;
+  vehicle_type?: string | null;
+  vehicle_number?: string | null;
+  mobile_number?: string | null;
 }
+
+export type DispatcherVehicleType = 'trailer' | 'container_truck' | 'reefer_truck' | 'flatbed' | 'tanker';
 
 // ─── City / Hub ────────────────────────────────────────────────────────────
 export interface City {

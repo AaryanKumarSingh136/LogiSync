@@ -62,8 +62,14 @@ class Settings(BaseSettings):
 
     # Security & Rate Limiting
     SECRET_KEY: str = "logisync-super-secret-production-signing-key-2026"
-    ALGORITHM: str = "RS256"
+    JWT_SECRET: str = ""
+    JWT_ALGORITHM: str = "HS256"
+    ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    OTP_PEPPER: str = "logisync-otp-pepper-dev-only"
+    OTP_EXPIRE_MINUTES: int = 5
+    OTP_MAX_ATTEMPTS: int = 5
+    OTP_RATE_LIMIT_PER_15MIN: int = 3
     RATE_LIMIT_DEFAULT: str = "100/minute"
     RATE_LIMIT_AI: str = "20/minute"
 
@@ -111,6 +117,10 @@ class Settings(BaseSettings):
         # SQLite dev default + Postgres prod: normalize async driver URL for sync engine
         if self.DATABASE_URL.startswith("sqlite+aiosqlite:"):
             self.DATABASE_URL = self.DATABASE_URL.replace("sqlite+aiosqlite:", "sqlite:", 1)
+        if self.DATABASE_URL.startswith("postgresql://"):
+            self.DATABASE_URL = self.DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+        if not self.JWT_SECRET:
+            self.JWT_SECRET = self.SECRET_KEY
         # Placeholder API keys (YOUR_.../XXXX...) mean "not configured" -> simulate
         if self._is_placeholder(self.GOOGLE_MAPS_SERVER_API_KEY):
             self.GOOGLE_MAPS_SERVER_API_KEY = ""

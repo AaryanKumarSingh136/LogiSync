@@ -33,7 +33,14 @@ def list_trucks(
     _user=Depends(get_current_user),
 ):
     """Returns fleet vehicles, optionally filtered to one port."""
-    port_id = port or city
+    # Fleet managers are locked to their assigned port server-side (like bookings)
+    if _user.get("role") == "fleet_manager":
+        assigned = _user.get("assigned_port_id")
+        if not assigned:
+            raise HTTPException(status_code=403, detail="No assigned port.")
+        port_id = assigned
+    else:
+        port_id = port or city
     query = db.query(TruckModel)
     if port_id:
         if not is_valid_port(port_id):

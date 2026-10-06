@@ -1,84 +1,86 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import type { AuthUser } from '../types';
-import { isDemoMode } from '../config/aws';
-import { cognitoLogin, cognitoSignup, cognitoLogout } from '../services/auth';
+import api from '../services/api';
 
 interface AuthContextValue {
   user: AuthUser | null;
+  token: string | null;
   isLoading: boolean;
   error: string | null;
-  isDemoMode: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  loginDemo: (role?: string) => void;
-  signup: (email: string, password: string, name: string, role: string) => Promise<void>;
+  login: (identifier: string, password: string) => Promise<string>;
   logout: () => void;
+  refreshMe: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const TOKEN_KEY = 'logisync_token';
+
+function toAuthUser(data: any): AuthUser {
+  return {
+    sub: data.id, email: data.email, name: data.full_name, role: data.role,
+    groups: [data.role], assigned_port_id: data.assigned_port_id,
+    must_change_password: data.must_change_password,
+    vehicle_number: data.vehicle_number ?? null, vehicle_type: data.vehicle_type ?? null,
+    mobile_number: data.mobile_number ?? null,
+  } as AuthUser;
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser]       = useState<AuthUser | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
   const [isLoading, setLoading] = useState(false);
-  const [error, setError]     = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const login = useCallback(async (email: string, password: string) => {
+  const refreshMe = useCallback(async () => {
+    const t = localStorage.getItem(TOKEN_KEY);
+    if (!t) return;
+    try {
+      const { data } = await api.get('/api/auth/me', { headers: { Authorization: `Bearer ${t}` } });
+      setUser(toAuthUser(data));
+      setToken(t);
+    } catch {
+      localStorage.removeItem(TOKEN_KEY);
+      setUser(null);
+      setToken(null);
+    }
+  }, []);
+
+  useEffect(() => { if (token && !user) refreshMe(); }, [token, user, refreshMe]);
+
+  const login = useCallback(async (identifier: string, password: string) => {
     setLoading(true);
     setError(null);
+    // Clear any stale session (e.g. previous fleet_manager) before authenticating
+    // so the UI never renders the old role while the new /me resolves.
+    setUser(null);
+    localStorage.removeItem(TOKEN_KEY);
+    setToken(null);
     try {
-      if (isDemoMode) {
-        // Demo mode — bypass Cognito
-        setUser({
-          sub: 'demo-user-001',
-          email,
-          name: email.split('@')[0].toUpperCase(),
-          role: 'port_admin',
-          groups: ['port_admin'],
-        });
-      } else {
-        const authUser = await cognitoLogin(email, password);
-        setUser(authUser);
-      }
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Login failed');
+      const { data } = await api.post('/api/auth/login', { identifier, password });
+      localStorage.setItem(TOKEN_KEY, data.access_token);
+      setToken(data.access_token);
+      await refreshMe();
+      // fetch fresh since refreshMe is async
+      const me = await api.get('/api/auth/me', { headers: { Authorization: `Bearer ${data.access_token}` } });
+      const u = toAuthUser(me.data);
+      setUser(u);
+      return me.data.role as string;
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || 'Login failed';
+      setError(typeof msg === 'string' ? msg : JSON.stringify(msg));
       throw e;
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  const loginDemo = useCallback((role = 'port_admin') => {
-    setUser({
-      sub: 'demo-karanesh-001',
-      email: 'karanesh@vocport.gov.in',
-      name: 'KARANESH G.',
-      role: role as AuthUser['role'],
-      groups: [role],
-    });
-  }, []);
-
-  const signup = useCallback(async (email: string, password: string, name: string, role: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      await cognitoSignup(email, password, name, role);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Signup failed');
-      throw e;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  }, [refreshMe]);
 
   const logout = useCallback(() => {
-    cognitoLogout();
+    localStorage.removeItem(TOKEN_KEY);
     setUser(null);
+    setToken(null);
   }, []);
 
-  return (
-    <AuthContext.Provider value={{ user, isLoading, error, isDemoMode, login, loginDemo, signup, logout }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={{ user, token, isLoading, error, login, logout, refreshMe }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {

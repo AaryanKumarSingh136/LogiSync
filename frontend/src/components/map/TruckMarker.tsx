@@ -45,7 +45,7 @@ function typeGlyph(truckType: string): string {
   }
 }
 
-function createTruckDivIcon(truck: Truck, selected: boolean): L.DivIcon {
+function createTruckDivIcon(truck: { truckType: string; status: string }, selected: boolean): L.DivIcon {
   const st = statusOf(truck.status);
 
   // Markers stay upright — GPS heading is shown in the tooltip + inspector,
@@ -75,6 +75,7 @@ function createTruckDivIcon(truck: Truck, selected: boolean): L.DivIcon {
   });
 }
 
+export { createTruckDivIcon, statusOf };
 export function TruckMarker({ map, truck, selected = false, onClick }: TruckMarkerProps) {
   const markerRef = useRef<L.Marker | null>(null);
 

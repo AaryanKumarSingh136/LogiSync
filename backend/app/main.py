@@ -6,7 +6,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import get_settings
-from app.db import Base, engine, ensure_port_columns
+from app.db import Base, engine, ensure_port_columns, ensure_user_columns
 from app.seed import seed_database
 from app.middleware import (
     SecurityHeadersMiddleware,
@@ -16,6 +16,8 @@ from app.middleware import (
 )
 from app.routers import (
     auth_router,
+    bookings_router,
+    admin_router,
     maps_router,
     slots_router,
     fleet_router,
@@ -33,8 +35,12 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: ensure tables, migrate pre-multi-port DBs, seed initial data
+    import app.models.user  # noqa: F401 — register users table for create_all
+    import app.models.otp  # noqa: F401
+    import app.models.booking  # noqa: F401
     Base.metadata.create_all(bind=engine)
     ensure_port_columns()
+    ensure_user_columns()
     seed_database()
     task = asyncio.create_task(periodic_telemetry_broadcast())
     yield
@@ -73,6 +79,8 @@ app.add_middleware(
 
 # ─── Include API Routers ─────────────────────────────────────────────────────
 app.include_router(auth_router, prefix=settings.API_PREFIX)
+app.include_router(bookings_router, prefix=settings.API_PREFIX)
+app.include_router(admin_router, prefix=settings.API_PREFIX)
 app.include_router(maps_router, prefix=settings.API_PREFIX)
 app.include_router(slots_router, prefix=settings.API_PREFIX)
 app.include_router(fleet_router, prefix=settings.API_PREFIX)

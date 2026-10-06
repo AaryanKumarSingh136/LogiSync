@@ -1,6 +1,5 @@
 import axios from 'axios';
 import type { Truck, Gate, Slot, KPIData, TelemetryStats, RouteResult, Notification } from '../types';
-import { getCognitoToken } from './auth';
 
 // VITE_API_URL is baked at build time. Empty string means same-origin (Nginx
 // proxies /api/ in prod), so use nullish coalescing: explicit "" stays "".
@@ -24,6 +23,60 @@ export async function fetchRoute(
     params: { from_lat: fromLat, from_lng: fromLng, to_lat: toLat, to_lng: toLng, mode },
   });
   return data;
+}
+
+const GEOAPIFY_KEY = import.meta.env.VITE_GEOAPIFY_API_KEY || '';
+
+/** Geocode a place name → [lat, lng] via Geoapify. Returns null when unresolved. */
+export async function geocodePlace(place: string): Promise<[number, number] | null> {
+  try {
+    const res = await fetch(
+      `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(place)}&limit=1&apiKey=${GEOAPIFY_KEY}`
+    );
+    const data = await res.json();
+    const feat = data?.features?.[0];
+    if (!feat) return null;
+    const [lng, lat] = feat.geometry.coordinates;
+    return [lat, lng];
+  } catch {
+    return null;
+  }
+}
+
+/** localStorage helpers for dispatcher-picked routes (per booking id). */
+export interface StoredRoute {
+  bookingId: string;
+  tokenNumber: string;
+  label: string;
+  color: string;
+  distanceKm: number;
+  etaMin: number;
+  latlngs: [number, number][];
+  dest: [number, number];
+}
+
+export function routeKey(bookingId: string) {
+  return `logisync-route-${bookingId}`;
+}
+
+export function loadStoredRoute(bookingId: string): StoredRoute | null {
+  try {
+    const raw = localStorage.getItem(routeKey(bookingId));
+    if (!raw) return null;
+    const r = JSON.parse(raw);
+    if (!Array.isArray(r.latlngs) || r.latlngs.length < 2) return null;
+    return r as StoredRoute;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredRoute(r: StoredRoute) {
+  try { localStorage.setItem(routeKey(r.bookingId), JSON.stringify(r)); } catch { /* ignore */ }
+}
+
+export function clearStoredRoute(bookingId: string) {
+  try { localStorage.removeItem(routeKey(bookingId)); } catch { /* ignore */ }
 }
 
 function normalizeTruck(raw: any): Truck {
@@ -104,14 +157,76 @@ function normalizeGate(raw: any): Gate {
   };
 }
 
-// ─── JWT Interceptor ───────────────────────────────────────────────────────
+// ─── JWT Interceptor (local JWT in localStorage) ─────────────────────────
 api.interceptors.request.use(cfg => {
-  const token = getCognitoToken();
+  const token = localStorage.getItem('logisync_token');
   if (token && cfg.headers) {
     cfg.headers['Authorization'] = `Bearer ${token}`;
   }
   return cfg;
 });
+
+// ─── Auth / OTP / Bookings / Admin ─────────────────────────────────────
+export async function checkMobile(mobile: string) {
+  const { data } = await api.get('/api/auth/check-mobile', { params: { mobile } });
+  return data;
+}
+export async function sendOtp(target_type: string, target_value: string, purpose = 'signup') {
+  const { data } = await api.post('/api/auth/send-otp', { target_type, target_value, purpose });
+  return data;
+}
+export async function verifyOtp(target_type: string, target_value: string, code: string) {
+  const { data } = await api.post('/api/auth/verify-otp', { target_type, target_value, code });
+  return data;
+}
+export async function registerDispatcher(payload: any) {
+  const { data } = await api.post('/api/auth/register', { ...payload, role: 'dispatcher' });
+  return data;
+}
+export async function fetchMyBookings() {
+  const { data } = await api.get('/api/bookings/mine');
+  return data;
+}
+export async function fetchBookings(port?: string) {
+  const { data } = await api.get('/api/bookings', { params: port ? { port } : {} });
+  return data;
+}
+export async function createBooking(payload: any) {
+  const { data } = await api.post('/api/bookings', payload);
+  return data;
+}
+export async function updateBookingStatus(id: string, status: string, is_delayed?: boolean) {
+  const { data } = await api.patch(`/api/bookings/${id}/status`, { status, is_delayed });
+  return data;
+}
+export async function rescheduleBooking(id: string, payload: { reserved_date?: string; reserved_time_start?: string; reserved_time_end?: string; gate_id?: string }) {
+  const { data } = await api.patch(`/api/bookings/${id}/schedule`, payload);
+  return data;
+}
+export async function cancelBooking(id: string) {
+  const { data } = await api.delete(`/api/bookings/${id}`);
+  return data;
+}
+export async function createFleetManager(payload: any) {
+  const { data } = await api.post('/api/admin/fleet-managers', payload);
+  return data;
+}
+export async function fetchAdminUsers(role?: string, port?: string) {
+  const { data } = await api.get('/api/admin/users', { params: { role, port } });
+  return data;
+}
+export async function deactivateUser(id: string) {
+  const { data } = await api.patch(`/api/admin/users/${id}/deactivate`);
+  return data;
+}
+export async function activateUser(id: string) {
+  const { data } = await api.patch(`/api/admin/users/${id}/activate`);
+  return data;
+}
+export async function deleteUser(id: string) {
+  const { data } = await api.delete(`/api/admin/users/${id}`);
+  return data;
+}
 
 // ─── Maps / Routing ────────────────────────────────────────────────────────
 export async function getDirections(
@@ -248,22 +363,26 @@ export async function fetchKPIs(period: '24h' | '7d' | '30d' = '24h', portId?: s
 }
 
 export async function fetchHeatmapData(period: string = '24h', portId?: string): Promise<any> {
-  const { data } = await api.get('/api/analytics/charts/congestion-heatmap', { params: { period, port: portId } });
+  const p = period === 'monthly' ? '30d' : period;
+  const { data } = await api.get('/api/analytics/charts/congestion-heatmap', { params: { period: p, port: portId } });
   return data;
 }
 
 export async function fetchTurnaroundData(period: string = '7d', portId?: string): Promise<any> {
-  const { data } = await api.get('/api/analytics/charts/turnaround', { params: { period, port: portId } });
+  const p = period === 'monthly' ? '30d' : period;
+  const { data } = await api.get('/api/analytics/charts/turnaround', { params: { period: p, port: portId } });
   return data;
 }
 
-export async function fetchQueueDepth(gate?: string, portId?: string): Promise<any> {
-  const { data } = await api.get('/api/analytics/charts/queue-depth', { params: { gate, port: portId } });
+export async function fetchQueueDepth(gate?: string, portId?: string, period: string = '24h'): Promise<any> {
+  const p = period === 'monthly' ? '30d' : period;
+  const { data } = await api.get('/api/analytics/charts/queue-depth', { params: { gate, port: portId, period: p } });
   return data;
 }
 
-export async function fetchRerouteImpact(portId?: string): Promise<any> {
-  const { data } = await api.get('/api/analytics/charts/reroute-impact', { params: portId ? { port: portId } : {} });
+export async function fetchRerouteImpact(portId?: string, period: string = '24h'): Promise<any> {
+  const p = period === 'monthly' ? '30d' : period;
+  const { data } = await api.get('/api/analytics/charts/reroute-impact', { params: { port: portId, period: p } });
   return data;
 }
 
